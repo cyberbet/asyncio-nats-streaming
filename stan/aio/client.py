@@ -14,6 +14,9 @@
 
 import asyncio
 import random
+
+from nats.aio.utils import new_inbox
+
 import stan.pb.protocol_pb2 as protocol
 from stan.aio.errors import *
 from time import time as now
@@ -39,6 +42,9 @@ DEFAULT_MAX_PUB_ACKS_INFLIGHT = 16384
 # Max number of pending messages awaiting
 # to be processed on a single subscriptions.
 DEFAULT_PENDING_LIMIT = 8192
+
+DEFAULT_PING_MAX_OUT = 3
+DEFAULT_PING_INTERVAL = 5
 
 class Client:
     """
@@ -76,6 +82,12 @@ class Client:
         # Map of subscriptions related to the NATS Streaming session.
         self._sub_map = {}
 
+        self._ping_inbox = None
+        self._ping_out = 0
+        self._ping_max_out = 3
+        self._ping_interval = 5
+        self._disconnected_cb = None
+
     def __repr__(self):
         return "<nats streaming client v{}>".format(__version__)
 
@@ -83,7 +95,10 @@ class Client:
                       nats=None,
                       connect_timeout=DEFAULT_CONNECT_TIMEOUT,
                       max_pub_acks_inflight=DEFAULT_MAX_PUB_ACKS_INFLIGHT,
-                      loop=None,
+                      disconnected_cb=None,
+                      ping_max_out=DEFAULT_PING_MAX_OUT,
+                      ping_interval=DEFAULT_PING_INTERVAL,
+                      loop=None
                       ):
         """
         Starts a session with a NATS Streaming cluster.
@@ -95,6 +110,9 @@ class Client:
         self._client_id = client_id
         self._loop = loop
         self._connect_timeout = connect_timeout
+        self._disconnected_cb = disconnected_cb
+        self._ping_max_out = ping_max_out
+        self._ping_interval = ping_interval
 
         if nats is not None:
             self._nc = nats
@@ -157,6 +175,24 @@ class Client:
         self._unsub_req_subject = resp.unsubRequests
         self._close_req_subject = resp.closeRequests
         self._sub_close_req_subject = resp.subCloseRequests
+
+        self._ping_inbox = new_inbox()
+        await self.subscribe(self._ping_inbox, cb=self._process_ping)
+        self._loop.create_task(self._pinger())
+
+    async def _pinger(self):
+        while True:
+            self._ping_out += 1
+            await self.publish(self._ping_inbox, b'', ack_handler=lambda: None)
+
+            if self._ping_out > self._ping_max_out:
+                await self.close()
+                raise StanError('stan: connection lost')
+
+            await asyncio.sleep(self._ping_interval)
+
+    async def _process_ping(self, msg):
+        self._ping_out = 0
 
     async def _process_heartbeats(self, msg):
         """
@@ -435,6 +471,9 @@ class Client:
             except:
                 continue
         self._sub_map = {}
+
+        if self._disconnected_cb is not None:
+            await self._disconnected_cb()
 
     async def close(self):
         """
