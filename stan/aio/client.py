@@ -176,7 +176,7 @@ class Client:
         self._close_req_subject = resp.closeRequests
         self._sub_close_req_subject = resp.subCloseRequests
 
-        self._ping_inbox = new_inbox()
+        self._ping_inbox = 'ping-inbox'
         await self.subscribe(self._ping_inbox, cb=self._process_ping)
         self._loop.create_task(self._pinger())
 
